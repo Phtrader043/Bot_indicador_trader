@@ -1,51 +1,71 @@
-
+import json
+import pytz
 from datetime import datetime, timedelta
 from indicators import calcular_indicadores
 from ai_analysis import analisar_contexto
-from data_sources.cryptocompare import get_crypto_price
-from data_sources.twelvedata import get_forex_price
-import pytz
+from data_sources.cryptocompare import obter_dados_cripto
+from data_sources.twelvedata import obter_dados_forex
+from utils import salvar_sinal, validar_resultado, ativos_cripto, pares_forex
 
 fuso_brasilia = pytz.timezone("America/Sao_Paulo")
-ativos = [
-    "BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "ADA/USDT",
-    "EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "AUD/USD"
-]
 
 def gerar_sinal():
-    melhores = []
-    for ativo in ativos:
-        dados = get_crypto_price(ativo) if "USDT" in ativo else get_forex_price(ativo)
-        if not dados:
-            continue
-        score, tipo = calcular_indicadores(dados)
+    agora = datetime.now(pytz.utc).astimezone(fuso_brasilia)
+    melhor_sinal = None
+    maior_score = 0
+
+    for ativo in ativos_cripto + pares_forex:
+        dados = obter_dados_cripto(ativo) if ativo in ativos_cripto else obter_dados_forex(ativo)
+        indicadores = calcular_indicadores(dados)
+
+        score = indicadores["score"]
+        direcao = indicadores["direcao"]
+
+        # Reforço IA
         reforco = analisar_contexto(dados, ativo)
-        final_score = (score + reforco) / 2
-        if final_score >= 90:
-            hora_entrada = datetime.now(fuso_brasilia) + timedelta(minutes=2)
-            hora_saida = hora_entrada + timedelta(minutes=1)
-            preco = dados[-1]["close"]
-            return {
+
+        if reforco == "positivo":
+            reforco_score = 100
+        elif reforco == "neutro":
+            reforco_score = 50
+        else:
+            reforco_score = 0
+
+        final_score = (score + reforco_score) / 2
+
+        if final_score >= 90 and final_score > maior_score:
+            melhor_sinal = {
                 "ativo": ativo,
-                "tipo": tipo,
-                "hora_entrada": hora_entrada.strftime("%Y-%m-%d %H:%M:%S"),
-                "hora_saida": hora_saida.strftime("%Y-%m-%d %H:%M:%S"),
-                "score": round(final_score, 2),
-                "preco_entrada": preco
+                "tipo": "COMPRA" if direcao == "alta" else "VENDA",
+                "hora_entrada": (agora + timedelta(minutes=2)).strftime("%H:%M:%S"),
+                "hora_saida": (agora + timedelta(minutes=3)).strftime("%H:%M:%S"),
+                "probabilidade": round(final_score, 2),
+                "preco_entrada": dados[-1]["close"],
+                "resultado": "Aguardando"
             }
+            maior_score = final_score
+
+    if melhor_sinal:
+        salvar_sinal(melhor_sinal)
+        return melhor_sinal
+
     return None
 
-def validar_resultado(sinais):
-    agora = datetime.now(fuso_brasilia)
-    for s in sinais:
-        if "resultado" not in s:
-            saida = fuso_brasilia.localize(datetime.strptime(s["hora_saida"], "%Y-%m-%d %H:%M:%S"))
-            if agora >= saida:
-                dados = get_crypto_price(s["ativo"]) if "USDT" in s["ativo"] else get_forex_price(s["ativo"])
-                preco_saida = dados[-1]["close"]
-                preco_entrada = s["preco_entrada"]
-                if s["tipo"] == "COMPRA":
-                    s["resultado"] = "WIN" if preco_saida > preco_entrada else "LOSS"
-                else:
-                    s["resultado"] = "WIN" if preco_saida < preco_entrada else "LOSS"
-    return sinais
+
+def verificar_resultados():
+    try:
+        with open("signals.json", "r") as f:
+            sinais = json.load(f)
+    except FileNotFoundError:
+        sinais = []
+
+    agora = datetime.now(pytz.utc).astimezone(fuso_brasilia).strftime("%H:%M:%S")
+
+    for sinal in sinais:
+        if sinal["resultado"] == "Aguardando" and sinal["hora_saida"] <= agora:
+            resultado = validar_resultado(sinal)
+            sinal["resultado"] = resultado
+
+    with open("signals.json", "w") as f:
+        json.dump(sinais, f, indent=4)
+        
